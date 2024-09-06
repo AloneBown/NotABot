@@ -31,7 +31,7 @@ class TicketView(discord.ui.View):
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
     async def accept_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.rejected==True:
+        if self.rejected:
             await interaction.response.send_message("This ticket has already been rejected.", ephemeral=True)
             return
 
@@ -42,7 +42,7 @@ class TicketView(discord.ui.View):
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger)
     async def reject_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.accepted==True:
+        if self.accepted:
             await interaction.response.send_message("This ticket has already been accepted.", ephemeral=True)
             return
 
@@ -64,6 +64,70 @@ class TicketView(discord.ui.View):
             actioned_by
         ]
         tickets.append_row(ticket_info)
+
+class TicketAdminView(discord.ui.View):
+    def __init__(self, tickets, page=0):
+        super().__init__(timeout=None)
+        self.tickets = tickets
+        self.page = page
+        self.create_buttons()
+
+    def create_buttons(self):
+        start = self.page * 10
+        end = start + 10
+        for ticket in self.tickets[start:end]:
+            button = discord.ui.Button(label=f"Ticket {ticket['id']}", style=discord.ButtonStyle.primary)
+            button.callback = self.create_callback(ticket['id'])
+            self.add_item(button)
+        
+        if self.page > 0:
+            prev_button = discord.ui.Button(label="Previous", style=discord.ButtonStyle.secondary)
+            prev_button.callback = self.prev_page
+            self.add_item(prev_button)
+        
+        if end < len(self.tickets):
+            next_button = discord.ui.Button(label="Next", style=discord.ButtonStyle.secondary)
+            next_button.callback = self.next_page
+            self.add_item(next_button)
+
+    def create_callback(self, ticket_id):
+        async def callback(interaction):
+            await interaction.response.send_message(f"/aticket {ticket_id}", ephemeral=True)
+        return callback
+
+    async def prev_page(self, interaction):
+        self.page -= 1
+        await self.update_view(interaction)
+
+    async def next_page(self, interaction):
+        self.page += 1
+        await self.update_view(interaction)
+
+    async def update_view(self, interaction):
+        self.clear_items()
+        self.create_buttons()
+        await interaction.response.edit_message(view=self)
+
+def fetch_tickets():
+    tickets = []
+    records = tickets.get_all_records()
+    for record in records:
+        tickets.append({
+            "id": record["ID"],
+            "author": record["Author"],
+            "created_at": datetime.strptime(record["Created At"], "%Y-%m-%d %H:%M:%S")
+        })
+    return tickets
+
+@bot.slash_command(name="adminpanel", description="Show the ticket admin panel")
+async def admin_panel(ctx):
+    tickets = fetch_tickets()
+    embed = discord.Embed(title="Ticket Admin Panel", color=discord.Color.blue())
+    for ticket in tickets[:10]:  # Display only the first 10 tickets
+        embed.add_field(name=f"Ticket ID: {ticket['id']}", value=f"Author: {ticket['author']}\nCreated At: {ticket['created_at']}", inline=False)
+    
+    view = TicketAdminView(tickets[:10])
+    await ctx.respond(embed=embed, view=view)
 
 @bot.event
 async def on_ready():
