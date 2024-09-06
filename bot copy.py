@@ -1,7 +1,12 @@
 import discord
-from discord.ext import commands
 import gspread
+import pytz
+import asyncio
+import uuid
+from discord.ext import commands, tasks
 from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
+
 
 # Set up Discord bot
 intents = discord.Intents.default()
@@ -12,7 +17,53 @@ bot = discord.Bot(intents=intents)
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("Nothing to see here", scope)
 client = gspread.authorize(creds)
-sheet = client.open("Or here").sheet1
+sheet = client.open("And here").sheet1
+tickets = client.open("And here x2").get_worksheet(1)
+
+class TicketView(discord.ui.View):
+    def __init__(self, ctx, ticket_id, collected_messages):
+        super().__init__(timeout=None)
+        self.ctx = ctx
+        self.ticket_id = ticket_id
+        self.collected_messages = collected_messages
+        self.accepted = False
+        self.rejected = False
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
+    async def accept_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if self.rejected==True:
+            await interaction.response.send_message("This ticket has already been rejected.", ephemeral=True)
+            return
+
+        self.accepted = True
+        await self.ctx.author.send(f"Your ticket with ID {self.ticket_id} has been accepted. Please provide more information if you want.")
+        self.record_ticket("Accepted", interaction.user.name)
+        self.stop()
+
+    @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger)
+    async def reject_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if self.accepted==True:
+            await interaction.response.send_message("This ticket has already been accepted.", ephemeral=True)
+            return
+
+        self.rejected = True
+        await interaction.response.send_message("Your ticket is rejected.", ephemeral=True)
+        await self.ctx.author.send(f"Your ticket with ID {self.ticket_id} has been rejected.")
+        self.record_ticket("Rejected", interaction.user.name)
+        self.stop()
+
+    def record_ticket(self, status, actioned_by):
+        kyiv_tz = pytz.timezone('Europe/Kiev')
+        current_time = datetime.now(kyiv_tz).strftime("%Y-%m-%d %H:%M:%S")
+        ticket_info = [
+            self.ticket_id,
+            self.ctx.author.name,
+            current_time,
+            "\n".join(self.collected_messages),
+            status,
+            actioned_by
+        ]
+        tickets.append_row(ticket_info)
 
 @bot.event
 async def on_ready():
@@ -96,6 +147,46 @@ async def stats(ctx):
         await ctx.respond(embed=embed)
     else:
         await ctx.respond("User not found in the sheet.")
+
+# Command to open a ticket via Discord DM
+@bot.slash_command(name="ticket", description="Open a ticket")
+async def ticket(ctx):
+    if not isinstance(ctx.channel, discord.DMChannel):
+        await ctx.respond("Please open a ticket via DM.")
+        return
+    
+    await ctx.respond("Please describe your issue.")
+
+    def check(m):
+        return m.author == ctx.author and isinstance(m.channel, discord.DMChannel)
+
+    collected_messages = []
+    ticket_id = str(uuid.uuid4()) # Generate a random ticket ID
+
+    try:
+        while True:
+            message = await bot.wait_for("message", check=check, timeout=30)
+            collected_messages.append(message.content)
+    except asyncio.TimeoutError:
+        if not collected_messages:
+            await ctx.respond("No messages received. Ticket closed.")
+            return
+    
+        # Send collected messages to the specific channel in embed format
+        channel_id = 1120064397054853266  
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            await ctx.respond("Failed to find the specified channel.")
+            return
+
+        message_content = "\n".join(collected_messages)
+    
+        embed = discord.Embed(title=f"Ticket ID: {ticket_id}", description=message_content, color=discord.Color.blue())
+        embed.set_author(name=f"{ctx.author.name} ({ctx.author.id})")
+    
+        view = TicketView(ctx, ticket_id, collected_messages)
+        await channel.send(embed=embed, view=view)
+        await ctx.send("Your ticket has been submitted.")
 
 # Run bot
 bot.run('you realy expect me to put my token here?')
