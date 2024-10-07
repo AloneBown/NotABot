@@ -1,3 +1,7 @@
+# Copyright (C) 2024 by AloneBown
+# distrubed without any waranty of any kind
+# see GNU General Public License v3.0 for more information
+
 import discord, gspread, pytz, asyncio, uuid, yaml, json
 from discord.ext import commands, tasks
 from oauth2client.service_account import ServiceAccountCredentials
