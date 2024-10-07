@@ -1,25 +1,28 @@
-import discord
-import gspread
-import pytz
-import asyncio
-import uuid
+import discord, gspread, pytz, asyncio, uuid, yaml, json
 from discord.ext import commands, tasks
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
-
 
 # Set up Discord bot
 intents = discord.Intents.default()
 intents.members = True
 bot = discord.Bot(intents=intents)
 
+# Load config file and variables from it
+with open("config.yml", "r") as file:
+    config = yaml.safe_load(file)
+TOKEN = config["token"]
+KEY= config["key"]
+SHEET= config["sheet"]
+
 # Google Sheets setup
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("Nothing to see here", scope)
+creds = ServiceAccountCredentials.from_json_keyfile_name("C:/Users/alone/Downloads/bteu-434614-49fd00f1af89.json", scope)
 client = gspread.authorize(creds)
-sheet = client.open("And here").sheet1
-tickets = client.open("And here x2").get_worksheet(1)
+sheet = client.open(SHEET).sheet1
+tickets_sheet = client.open(SHEET).get_worksheet(1)
 
+# Ticket view when a ticket is first opened
 class TicketView(discord.ui.View):
     def __init__(self, ctx, ticket_id, collected_messages):
         super().__init__(timeout=None)
@@ -38,7 +41,41 @@ class TicketView(discord.ui.View):
         self.accepted = True
         await self.ctx.author.send(f"Your ticket with ID {self.ticket_id} has been accepted. Please provide more information if you want.")
         self.record_ticket("Accepted", interaction.user.name)
-        self.stop()
+        await self.collect_more_messages(interaction)
+    
+    def append_message_to_json(ticket_id, author_name, message_content):
+        file_path = f"tickets/{ticket_id}.json"
+    
+        with open(file_path, 'r') as json_file:
+            ticket_data = json.load(json_file)
+    
+        ticket_data['messages'].append({"author": author_name, "content": message_content})
+
+        with open(file_path, 'w') as json_file:
+            json.dump(ticket_data, json_file, indent=4)
+    
+    async def collect_more_messages(self, interaction):
+        def check(m):
+            return m.author == self.ctx.author and isinstance(m.channel, discord.DMChannel)
+
+        try:
+            while True:
+                message = await bot.wait_for("message", check=check, timeout=300)
+                append_message_to_json(self.ticket_id, new_message.author.name, new_message.content)
+        except asyncio.TimeoutError:
+            await self.ctx.author.send("No more messages received. You will be informed about the result of investigation.")
+            self.stop()
+    
+    def append_message_to_json(ticket_id, author_name, message_content):
+        file_path = f"tickets/{ticket_id}.json"
+    
+        with open(file_path, 'r') as json_file:
+            ticket_data = json.load(json_file)
+    
+        ticket_data['messages'].append({"author": author_name, "content": message_content})
+
+        with open(file_path, 'w') as json_file:
+            json.dump(ticket_data, json_file, indent=4)
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger)
     async def reject_button(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -63,8 +100,25 @@ class TicketView(discord.ui.View):
             status,
             actioned_by
         ]
-        tickets.append_row(ticket_info)
+        tickets_sheet.append_row(ticket_info)
+    
+    def save_ticket_to_json(self):
+        ticket_data = {
+            "ticket_id": self.ticket_id,
+            "author": self.ctx.author.name,
+            "user_id": self.ctx.author.id,
+            "created_at": datetime.now(pytz.timezone('Europe/Kiev')).strftime("%Y-%m-%d %H:%M:%S"),
+            "messages": self.collected_messages,
+            "status": status,
+            "actioned_by": actioned_by
+        }
 
+        file_path = f"tickets/{self.ticket_id}.json"
+        with open(file_path, 'w') as json_file:
+            json.dump(ticket_data, json_file, indent=4)
+        
+
+# Another view for adminpanel, but this time it's a buttons to open tickets
 class TicketAdminView(discord.ui.View):
     def __init__(self, tickets, page=0):
         super().__init__(timeout=None)
@@ -110,24 +164,16 @@ class TicketAdminView(discord.ui.View):
 
 def fetch_tickets():
     tickets = []
-    records = tickets.get_all_records()
+    expected_headers = ["1", "2", "3", "4", "5", "6"]
+    records = tickets_sheet.get_all_records(expected_headers=expected_headers)
     for record in records:
         tickets.append({
-            "id": record["ID"],
-            "author": record["Author"],
-            "created_at": datetime.strptime(record["Created At"], "%Y-%m-%d %H:%M:%S")
+            "id": record["1"],
+            "author": record["2"],
+            "created_at": datetime.strptime(record["3"], "%Y-%m-%d %H:%M:%S"),
+            "status": record["5"]
         })
     return tickets
-
-@bot.slash_command(name="adminpanel", description="Show the ticket admin panel")
-async def admin_panel(ctx):
-    tickets = fetch_tickets()
-    embed = discord.Embed(title="Ticket Admin Panel", color=discord.Color.blue())
-    for ticket in tickets[:10]:  # Display only the first 10 tickets
-        embed.add_field(name=f"Ticket ID: {ticket['id']}", value=f"Author: {ticket['author']}\nCreated At: {ticket['created_at']}", inline=False)
-    
-    view = TicketAdminView(tickets[:10])
-    await ctx.respond(embed=embed, view=view)
 
 @bot.event
 async def on_ready():
@@ -136,7 +182,6 @@ async def on_ready():
 # Command to fetch user Discord ID, nickname, and role, and send it to Google Sheets
 @bot.slash_command(name="rollin", description="Roll you in to team list")
 async def rollin(ctx, minecraft_nickname: str):
-    # Check if the user has administrator rights
     if not ctx.author.guild_permissions.administrator:
         await ctx.respond("You do not have the right to use the command.")
         return
@@ -146,12 +191,10 @@ async def rollin(ctx, minecraft_nickname: str):
     allowed_role_ids = {1280939518249140335, 1280939560095715328, 1280939592761086023}
     user_roles = {role.id for role in ctx.author.roles}
     
-    # Check if the user has any of the allowed roles
     if not allowed_role_ids.intersection(user_roles):
         await ctx.respond("You do not have the right to use the command.")
         return
     
-    # Check if the user is already entered into the table
     cell = sheet.find(user_id)
     if cell:
         await ctx.respond("You are already enlisted.")
@@ -160,10 +203,8 @@ async def rollin(ctx, minecraft_nickname: str):
     roles = [role.name for role in ctx.author.roles if role.id in allowed_role_ids]
     current_role = ", ".join(roles) if roles else "No roles"
     
-    # Append the user ID, name, Minecraft nickname, and role to the Google Sheet
     sheet.append_row([user_id, user_name, minecraft_nickname, current_role], table_range="B2")
     
-    # Create an embed message
     embed = discord.Embed(
         title="Entry Successful",
         description="You have successfully entered",
@@ -175,7 +216,6 @@ async def rollin(ctx, minecraft_nickname: str):
 # Command to fetch user role and update from allowed roles
 @bot.slash_command(name="stats", description="Check your stats and info")
 async def stats(ctx):
-    # Check if the user has administrator rights
     if not ctx.author.guild_permissions.administrator:
         await ctx.respond("You do not have the right to use the command.")
         return
@@ -184,21 +224,17 @@ async def stats(ctx):
     allowed_role_ids = {1280939518249140335, 1280939560095715328, 1280939592761086023}
     user_roles = {role.id for role in ctx.author.roles}
     
-    # Check if the user has any of the allowed roles
     if not allowed_role_ids.intersection(user_roles):
         await ctx.respond("You do not have the right to use the command.")
         return
     
-    # Fetch the user's current role from the Google Sheet
     cell = sheet.find(user_id)
     if cell:
         row = cell.row
         current_role_in_sheet = sheet.cell(row, 5).value
         
-         # Fetch the Minecraft nickname from the Google Sheet (assuming it's in column 3)
         minecraft_nickname = sheet.cell(row, 4).value
-            
-        # Create an embed message
+    
         embed = discord.Embed(
             title="Information about the player",
             color=discord.Color.yellow()
@@ -225,22 +261,24 @@ async def ticket(ctx):
         return m.author == ctx.author and isinstance(m.channel, discord.DMChannel)
 
     collected_messages = []
-    ticket_id = str(uuid.uuid4()) # Generate a random ticket ID
+    ticket_id = str(uuid.uuid4())
 
     try:
         while True:
-            message = await bot.wait_for("message", check=check, timeout=30)
+            message = await bot.wait_for("message", check=check, timeout=15)
             collected_messages.append(message.content)
+        # Append each new message to the corresponding ticket JSON file
+        append_message_to_json(ticket_id, message.author.name, message.content)
+
     except asyncio.TimeoutError:
         if not collected_messages:
             await ctx.respond("No messages received. Ticket closed.")
             return
     
-        # Send collected messages to the specific channel in embed format
         channel_id = 1120064397054853266  
         channel = bot.get_channel(channel_id)
         if channel is None:
-            await ctx.respond("Failed to find the specified channel.")
+            await ctx.respond("Failed to find the specified channel, contact bot owner.")
             return
 
         message_content = "\n".join(collected_messages)
@@ -251,6 +289,24 @@ async def ticket(ctx):
         view = TicketView(ctx, ticket_id, collected_messages)
         await channel.send(embed=embed, view=view)
         await ctx.send("Your ticket has been submitted.")
+    
+    def append_message_to_json(ticket_id, author_name, message_content):
+        file_path = f"tickets/{ticket_id}.json"
+    
+        with open(file_path, 'r') as json_file:
+            ticket_data = json.load(json_file)
+
+        ticket_data['messages'].append({"author": author_name, "content": message_content})
+
+# Command to show the ticket admin panel
+@bot.slash_command(name="ticketpanel", description="Show the ticket admin panel")
+async def ticketpanel(ctx):
+    tickets = fetch_tickets()
+    embed = discord.Embed(title="Ticket Admin Panel", color=discord.Color.blue())
+    for ticket in tickets[:10]:  # Display only the first 10 tickets
+        embed.add_field(name=f"Ticket ID: {ticket['id']}", value=f"Author: {ticket['author']}\nCreated At: {ticket['created_at']}\nStatus: {ticket['status']}", inline=False)
+    view = TicketAdminView(tickets[:10])
+    await ctx.respond(embed=embed, view=view)
 
 # Run bot
-bot.run('you realy expect me to put my token here?')
+bot.run(TOKEN)
