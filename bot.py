@@ -17,7 +17,7 @@ SHEET= config["sheet"]
 
 # Google Sheets setup
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("C:/Users/alone/Downloads/bteu-434614-49fd00f1af89.json", scope)
+creds = ServiceAccountCredentials.from_json_keyfile_name(KEY, scope)
 client = gspread.authorize(creds)
 sheet = client.open(SHEET).sheet1
 tickets_sheet = client.open(SHEET).get_worksheet(1)
