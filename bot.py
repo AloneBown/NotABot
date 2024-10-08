@@ -10,7 +10,6 @@
 # (do not remove this notice)
 
 import discord, gspread, pytz, asyncio, uuid, yaml, json, os
-from discord.ext import commands, tasks
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
@@ -28,27 +27,31 @@ creds = ServiceAccountCredentials.from_json_keyfile_name(KEY_T, scope)
 client = gspread.authorize(creds); sheet = client.open(SHEET).sheet1; tickets_sheet = client.open(SHEET).get_worksheet(1)
 
 # Function to append a new message to the corresponding ticket JSON file
-def append_message_to_json(ticket_id, author_name, message_content):
-    file_path = f"tickets/{ticket_id}/{ticket_id}.json"
-    
+def append_message_to_json(ticket_id, author_name, message_content, attachments):
+    file_path = f"tickets/{ticket_id}.json"
 
     with open(file_path, 'r') as json_file:
         ticket_data = json.load(json_file)
     
-    ticket_data['messages'].append({"author": author_name, "content": message_content})
+    ticket_data['messages'].append({
+        "author": author_name,
+        "content": message_content,
+        "attachments": attachments
+    })
 
     with open(file_path, 'w') as json_file:
         json.dump(ticket_data, json_file, indent=4)
 
 # Ticket view when a ticket is first opened
 class TicketView(discord.ui.View):
-    def __init__(self, ctx, ticket_id, collected_messages):
+    def __init__(self, ctx, ticket_id, collected_messages, attachments):
         super().__init__(timeout=None)
         self.ctx = ctx
         self.ticket_id = ticket_id
         self.collected_messages = collected_messages
         self.accepted = False
         self.rejected = False
+        self.attachments = attachments
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
     async def accept_button(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -70,13 +73,7 @@ class TicketView(discord.ui.View):
         try:
             while True:
                 new_message = await bot.wait_for("message", check=check, timeout=300)
-                attachments = []
-                    if new_message.attachments:
-                    for attachment in new_message.attachments:
-                        if attachment.content_type.startswith('image/'):
-                            file_path = f"tickets/{self.ticket_id}"
-                            await attachment.save(f"{file_path}/{attachment.filename}")
-                        attachments.append(attachment.url)
+                attachments = [attachment.url for attachment in new_message.attachments]
                 append_message_to_json(self.ticket_id, new_message.author.name, new_message.content, attachments)
         except asyncio.TimeoutError:
             await self.ctx.author.send("No more messages received. You will be informed about the result of investigation.")
@@ -110,6 +107,8 @@ class TicketView(discord.ui.View):
     
     # Save ticket as JSON file
     def save_ticket_to_json(self, status, actioned_by):
+        file_path = f"tickets/{self.ticket_id}.json"
+
         ticket_data = {
             "ticket_id": self.ticket_id,
             "author": self.ctx.author.name,
@@ -119,12 +118,13 @@ class TicketView(discord.ui.View):
             "status": status,
             "actioned_by": actioned_by
         }
+        for message, attachment in zip(self.collected_messages, self.attachments):
+            ticket_data['messages'].append({
+                "author": self.ctx.author.name,
+                "content": message,
+                "attachments": attachment
+            })
 
-        core_file_path = f"tickets/{ticket_id}"
-        file_path = f"tickets/{self.ticket_id}.json"
-
-        if not os.path.exists(core_file_path):
-            os.makedirs(core_file_path)
         with open(file_path, 'w') as json_file:
             json.dump(ticket_data, json_file, indent=4)
         
@@ -279,15 +279,7 @@ async def ticket(ctx):
         while True:
             message = await bot.wait_for("message", check=check, timeout=15)
             collected_messages.append(message.content)
-                if message.attachments:
-                    for attachment in new_message.attachments:
-                        if attachment.content_type.startswith('image/'):
-                            file_path = f"tickets/{self.ticket_id}"
-                            await attachment.save(f"{file_path}/{attachment.filename}")
-                        attachments.append(attachment.url)
-        # Append each new message to the corresponding ticket JSON file
-        append_message_to_json(ticket_id, message.author.name, message.content, attachments)
-
+            attachments = [attachment.url for attachment in message.attachments]
     except asyncio.TimeoutError:
         if not collected_messages:
             await ctx.respond("No messages received. Ticket closed.")
@@ -304,17 +296,9 @@ async def ticket(ctx):
         embed = discord.Embed(title=f"Ticket ID: {ticket_id}", description=message_content, color=discord.Color.blue())
         embed.set_author(name=f"{ctx.author.name} ({ctx.author.id})")
     
-        view = TicketView(ctx, ticket_id, collected_messages)
+        view = TicketView(ctx, ticket_id, collected_messages, attachments)
         await channel.send(embed=embed, view=view)
         await ctx.send("Your ticket has been submitted.")
-    
-    def append_message_to_json(ticket_id, author_name, message_content):
-        file_path = f"tickets/{ticket_id}.json"
-    
-        with open(file_path, 'r') as json_file:
-            ticket_data = json.load(json_file)
-
-        ticket_data['messages'].append({"author": author_name, "content": message_content})
 
 # Command to show the ticket admin panel
 @bot.slash_command(name="ticketpanel", description="Show the ticket admin panel")
