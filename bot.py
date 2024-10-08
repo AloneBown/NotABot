@@ -1,30 +1,44 @@
-# Copyright (C) 2024 by AloneBown
-# distrubed without any waranty of any kind
-# see GNU General Public License v3.0 for more information
+# Copyrighting (C) 2024 by AloneBown
+#
+# <-This code is free software; 
+# you can redistribute it and/or modify it under the terms of the license
+# This code is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; 
+# without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.->
+#  
+# See GNU General Public License v3.0 for more information.
+# You should receive a copy of it with code or visit https://www.gnu.org/licenses/gpl-3.0.html
+# (do not remove this notice)
 
-import discord, gspread, pytz, asyncio, uuid, yaml, json
+import discord, gspread, pytz, asyncio, uuid, yaml, json, os
 from discord.ext import commands, tasks
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
 # Set up Discord bot
-intents = discord.Intents.default()
-intents.members = True
-bot = discord.Bot(intents=intents)
+intents = discord.Intents.default(); intents.members = True; bot = discord.Bot(intents=intents)
 
 # Load config file and variables from it
 with open("config.yml", "r") as file:
     config = yaml.safe_load(file)
-TOKEN = config["token"]
-KEY= config["key"]
-SHEET= config["sheet"]
+TOKEN = config["token"]; KEY= config["key"]; KEY_T= config["key_t"]; SHEET= config["sheet"]
 
 # Google Sheets setup
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name(KEY, scope)
-client = gspread.authorize(creds)
-sheet = client.open(SHEET).sheet1
-tickets_sheet = client.open(SHEET).get_worksheet(1)
+creds = ServiceAccountCredentials.from_json_keyfile_name(KEY_T, scope)
+client = gspread.authorize(creds); sheet = client.open(SHEET).sheet1; tickets_sheet = client.open(SHEET).get_worksheet(1)
+
+# Function to append a new message to the corresponding ticket JSON file
+def append_message_to_json(ticket_id, author_name, message_content):
+    file_path = f"tickets/{ticket_id}/{ticket_id}.json"
+    
+
+    with open(file_path, 'r') as json_file:
+        ticket_data = json.load(json_file)
+    
+    ticket_data['messages'].append({"author": author_name, "content": message_content})
+
+    with open(file_path, 'w') as json_file:
+        json.dump(ticket_data, json_file, indent=4)
 
 # Ticket view when a ticket is first opened
 class TicketView(discord.ui.View):
@@ -45,18 +59,9 @@ class TicketView(discord.ui.View):
         self.accepted = True
         await self.ctx.author.send(f"Your ticket with ID {self.ticket_id} has been accepted. Please provide more information if you want.")
         self.record_ticket("Accepted", interaction.user.name)
+        self.save_ticket_to_json("Accepted", interaction.user.name)
+        
         await self.collect_more_messages(interaction)
-    
-    def append_message_to_json(ticket_id, author_name, message_content):
-        file_path = f"tickets/{ticket_id}.json"
-    
-        with open(file_path, 'r') as json_file:
-            ticket_data = json.load(json_file)
-    
-        ticket_data['messages'].append({"author": author_name, "content": message_content})
-
-        with open(file_path, 'w') as json_file:
-            json.dump(ticket_data, json_file, indent=4)
     
     async def collect_more_messages(self, interaction):
         def check(m):
@@ -64,22 +69,18 @@ class TicketView(discord.ui.View):
 
         try:
             while True:
-                message = await bot.wait_for("message", check=check, timeout=300)
-                append_message_to_json(self.ticket_id, new_message.author.name, new_message.content)
+                new_message = await bot.wait_for("message", check=check, timeout=300)
+                attachments = []
+                    if new_message.attachments:
+                    for attachment in new_message.attachments:
+                        if attachment.content_type.startswith('image/'):
+                            file_path = f"tickets/{self.ticket_id}"
+                            await attachment.save(f"{file_path}/{attachment.filename}")
+                        attachments.append(attachment.url)
+                append_message_to_json(self.ticket_id, new_message.author.name, new_message.content, attachments)
         except asyncio.TimeoutError:
             await self.ctx.author.send("No more messages received. You will be informed about the result of investigation.")
             self.stop()
-    
-    def append_message_to_json(ticket_id, author_name, message_content):
-        file_path = f"tickets/{ticket_id}.json"
-    
-        with open(file_path, 'r') as json_file:
-            ticket_data = json.load(json_file)
-    
-        ticket_data['messages'].append({"author": author_name, "content": message_content})
-
-        with open(file_path, 'w') as json_file:
-            json.dump(ticket_data, json_file, indent=4)
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger)
     async def reject_button(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -93,6 +94,7 @@ class TicketView(discord.ui.View):
         self.record_ticket("Rejected", interaction.user.name)
         self.stop()
 
+    # Record ticket in Google Sheets
     def record_ticket(self, status, actioned_by):
         kyiv_tz = pytz.timezone('Europe/Kiev')
         current_time = datetime.now(kyiv_tz).strftime("%Y-%m-%d %H:%M:%S")
@@ -106,7 +108,8 @@ class TicketView(discord.ui.View):
         ]
         tickets_sheet.append_row(ticket_info)
     
-    def save_ticket_to_json(self):
+    # Save ticket as JSON file
+    def save_ticket_to_json(self, status, actioned_by):
         ticket_data = {
             "ticket_id": self.ticket_id,
             "author": self.ctx.author.name,
@@ -117,7 +120,11 @@ class TicketView(discord.ui.View):
             "actioned_by": actioned_by
         }
 
+        core_file_path = f"tickets/{ticket_id}"
         file_path = f"tickets/{self.ticket_id}.json"
+
+        if not os.path.exists(core_file_path):
+            os.makedirs(core_file_path)
         with open(file_path, 'w') as json_file:
             json.dump(ticket_data, json_file, indent=4)
         
@@ -265,14 +272,21 @@ async def ticket(ctx):
         return m.author == ctx.author and isinstance(m.channel, discord.DMChannel)
 
     collected_messages = []
+    attachments = []
     ticket_id = str(uuid.uuid4())
 
     try:
         while True:
             message = await bot.wait_for("message", check=check, timeout=15)
             collected_messages.append(message.content)
+                if message.attachments:
+                    for attachment in new_message.attachments:
+                        if attachment.content_type.startswith('image/'):
+                            file_path = f"tickets/{self.ticket_id}"
+                            await attachment.save(f"{file_path}/{attachment.filename}")
+                        attachments.append(attachment.url)
         # Append each new message to the corresponding ticket JSON file
-        append_message_to_json(ticket_id, message.author.name, message.content)
+        append_message_to_json(ticket_id, message.author.name, message.content, attachments)
 
     except asyncio.TimeoutError:
         if not collected_messages:
