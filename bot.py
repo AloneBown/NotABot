@@ -215,7 +215,7 @@ def fetch_tickets():
 class AticketView(discord.ui.View):
     def __init__(self, ticket_id, ticket_author):
         super().__init__(timeout=None)
-        self.ticket_id = ticket_id; self.closed = False; self.author = ticket_author
+        self.ticket_id = ticket_id; self.closed = False; self.ctx.author = ticket_author
         self.bot = bot
 
     @discord.ui.button(label="Record an conversation", style=discord.ButtonStyle.success)
@@ -244,8 +244,11 @@ class AticketView(discord.ui.View):
         self.closed = True
         self.record_ticket_closing("Closed")
 
-        ticket_author = self.author
-        await ticket_author.send(f"Your ticket with ID {self.ticket_id} has been closed.")
+        ticket_author = self.ctx.author
+        try:
+            await ticket_author.send(f"Your ticket with ID {self.ticket_id} has been closed.")
+        except discord.Forbidden:
+            print(f"Could not send DM to {ticket_author.name}. They might have DMs disabled.")
 
         await asyncio.sleep(5)
         await interaction.delete_original_message()
@@ -335,6 +338,7 @@ async def stats(ctx):
 async def ticket(ctx):
     if not isinstance(ctx.channel, discord.DMChannel):
         await ctx.respond("Please open a ticket via DM.")
+        return
     
     await ctx.respond("Please describe your issue.")
 
