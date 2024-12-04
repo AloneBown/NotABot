@@ -9,9 +9,7 @@ Existing futures:
 + post a general info about player (minecraft nick and role on discord server (will be reworked in future)
 + ticket system
 + .json ticket archivation system
++ admin ticket view
 
 Indev:
-+ admin ticket view (partially exist)
-
-Plans:
 + beginners system automatisation
