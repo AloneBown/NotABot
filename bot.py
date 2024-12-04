@@ -19,7 +19,7 @@ intents = discord.Intents.default(); intents.members = True; bot = discord.Bot(i
 # Load config file and variables from it
 with open("config.yml", "r") as file:
     config = yaml.safe_load(file)
-TOKEN = config["token"]; KEY= config["key"]; KEY_T= config["key_t"]; SHEET= config["sheet"]
+TOKEN = config["token"]; KEY= config["key"]; KEY_T= config["key_t"]; SHEET= config["sheet"]; GUILD= config["guild"]
 
 # Google Sheets setup
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -29,7 +29,6 @@ client = gspread.authorize(creds); sheet = client.open(SHEET).sheet1; tickets_sh
 # Function to append a new message to the corresponding ticket JSON file
 def append_message_to_json(ticket_id, author_name, message_content, attachments):
     file_path = f"tickets/{ticket_id}.json"
-
     try:
         with open(file_path, 'r') as json_file:
             ticket_data = json.load(json_file)
@@ -51,26 +50,37 @@ def append_message_to_json(ticket_id, author_name, message_content, attachments)
 class TicketView(discord.ui.View):
     def __init__(self, ctx, ticket_id, collected_messages, attachments):
         super().__init__(timeout=None)
-        self.ctx = ctx
-        self.ticket_id = ticket_id
-        self.collected_messages = collected_messages
-        self.accepted = False
-        self.rejected = False
-        self.attachments = attachments
-        self.closed = False
+        self.ctx = ctx; self.bot = bot; self.ticket_id = ticket_id; self.collected_messages = collected_messages; self.guild_id = GUILD
+        self.accepted = False; self.rejected = False; self.attachments = attachments; self.closed = False; self.sellected_moderator = None
+        
+        # Fetch the guild using the bot and guild_id
+        guild = self.bot.get_guild(self.guild_id)
+        if guild is not None:
+            self.moderators = [member for member in guild.members if any(role.name == 'тест' for role in member.roles)]
+            print(f"Found {len(self.moderators)} moderators.")
+            if 1 <= len(self.moderators) <= 25:
+                options = [discord.SelectOption(label=moderator.name, value=str(moderator.id)) for moderator in self.moderators]
+                select = discord.ui.Select(placeholder="Select a moderator", options=options, custom_id="moderator_select")
+                select.callback = self.moderator_select_callback
+                self.add_item(select)
+            else:
+                raise ValueError("The number of moderators must be between 1 and 25.")
+        else:
+            self.moderators = []
+            print("Guild not found or bot does not have access to the guild.") 
 
-    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
-    async def accept_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.rejected:
-            await interaction.response.send_message("This ticket has already been rejected.", ephemeral=True)
-            return
-
+    async def moderator_select_callback(self, interaction: discord.Interaction):
+        selected_moderator_id = int(interaction.data['values'][0])
+        guild = self.bot.get_guild(self.guild_id)
+        selected_moderator = discord.utils.get(guild.members, id=selected_moderator_id)
+        self.sellected_moderator = selected_moderator.name
         self.accepted = True
         self.closed = False
-        await self.ctx.author.send(f"Your ticket with ID {self.ticket_id} has been accepted. Please provide more information if you want.")
-        self.record_ticket("Accepted", interaction.user.name, "Open")
-        self.save_ticket_to_json("Accepted", interaction.user.name, "Open")
-        
+        await self.ctx.author.send(f"Your ticket with ID {self.ticket_id} has been accepted. Moderator, that will rewiew your ticket - {self.sellected_moderator}. Please provide more information if you want.")
+        await interaction.response.send_message("Ticket is accepted.", ephemeral=True)
+        self.record_ticket("Accepted", interaction.user.name, "Open", self.sellected_moderator)
+        self.save_ticket_to_json("Accepted", interaction.user.name, "Open", self.sellected_moderator)
+
         await self.collect_more_messages(interaction)
     
     async def collect_more_messages(self, interaction):
@@ -91,16 +101,18 @@ class TicketView(discord.ui.View):
         if self.accepted:
             await interaction.response.send_message("This ticket has already been accepted.", ephemeral=True)
             return
+        await asyncio.sleep(5)
+        await interaction.delete(1)
 
         self.rejected = True
         self.closed = True
         await interaction.response.send_message("Your ticket is rejected.", ephemeral=True)
         await self.ctx.author.send(f"Your ticket with ID {self.ticket_id} has been rejected.")
-        self.record_ticket("Rejected", interaction.user.name, "Closed")
+        self.record_ticket("Rejected", interaction.user.name, "Closed", "None")
         self.stop()
 
     # Record ticket in Google Sheets
-    def record_ticket(self, status, actioned_by, closed):
+    def record_ticket(self, status, actioned_by, closed, selected_moderator):
         kyiv_tz = pytz.timezone('Europe/Kiev')
         current_time = datetime.now(kyiv_tz).strftime("%Y-%m-%d %H:%M:%S")
         ticket_info = [
@@ -109,13 +121,14 @@ class TicketView(discord.ui.View):
             current_time,
             "\n".join(self.collected_messages),
             status,
-            actioned_by,
-            closed
+            actioned_by,     
+            closed,
+            selected_moderator
         ]
         tickets_sheet.append_row(ticket_info)
     
     # Save ticket as JSON file
-    def save_ticket_to_json(self, status, actioned_by, closed):
+    def save_ticket_to_json(self, status, actioned_by, closed, selected_moderator):
         file_path = f"tickets/{self.ticket_id}.json"
 
         ticket_data = {
@@ -126,6 +139,7 @@ class TicketView(discord.ui.View):
             "messages": self.collected_messages,
             "status": status,
             "actioned_by": actioned_by,
+            "moderator": selected_moderator,
             "closed": closed
         }
         for message, attachment in zip(self.collected_messages, self.attachments):
@@ -167,7 +181,7 @@ class TicketAdminView(discord.ui.View):
 
     def create_callback(self, ticket_id):
         async def callback(interaction):
-            await interaction.response.send_message(f"/aticket {ticket_id}", ephemeral=True)
+            await aticket(interaction, ticket_id=ticket_id)
         return callback
 
     async def prev_page(self, interaction):
@@ -185,7 +199,7 @@ class TicketAdminView(discord.ui.View):
 
 def fetch_tickets():
     tickets = []
-    expected_headers = ["1", "2", "3", "4", "5", "6", "7"]
+    expected_headers = ["1", "2", "3", "4", "5", "6", "7", "8"]
     records = tickets_sheet.get_all_records(expected_headers=expected_headers)
     for record in records:
         tickets.append({
@@ -197,53 +211,44 @@ def fetch_tickets():
         })
     return tickets
 
+# View for admin to see ticket messages and close the ticket
 class AticketView(discord.ui.View):
     def __init__(self, ticket_id, ticket_author):
         super().__init__(timeout=None)
-        self.ticket_id = ticket_id
-        self.closed = False
-        self.author = ticket_author
+        self.ticket_id = ticket_id; self.closed = False; self.author = ticket_author
+        self.bot = bot
 
-    @discord.ui.button(label="Answer", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Record an conversation", style=discord.ButtonStyle.success)
     async def answer_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         await interaction.response.send_message(f"Please provide answer to latest message below", ephemeral=True)
-        await self.collect_more_messages(interaction)
-        answer_text = await self.collect_more_messages(interaction)
-        if answer_text:
-            await self.author.send(f"Your ticket has been answered:\n\n{answer_text}")
-        
-        # Delete all bot responses in the chat
-        async for message in interaction.channel.history(limit=100):
-            if message.author == interaction.client.user:
-                await message.delete(1)
+        await self.collect_more_messages_a(interaction)
     
-    async def collect_more_messages(self, interaction):
+    async def collect_more_messages_a(self, interaction):
+        message = None
+        attachments = []
         try:
-            while True:
-                new_message = await bot.wait_for("message", timeout=15)
-                attachments = [attachment.url for attachment in new_message.attachments]
-                await self.append_message_to_json(self.ticket_id, new_message.author.name, new_message.content, attachments)
+            def check(message):
+                return message.channel == interaction.channel and message.author == interaction.user
+        
+            message = await self.bot.wait_for("message", timeout=15, check=check)
+            attachments = [attachment.url for attachment in message.attachments]
+            append_message_to_json(self.ticket_id, message.author.name, message.content, attachments)
+            await interaction.channel.send("Message and attachments collected successfully.")
         except asyncio.TimeoutError:
+            await interaction.channel.send("No response received. Timeout.")
             self.stop()
-    
-    async def append_message_to_json(self, ticket_id, author_name, message_content, attachments):
-        file_path = f"tickets/{ticket_id}.json"
-        with open(file_path, 'r') as json_file:
-            ticket_data = json.load(json_file)
-        ticket_data['messages'].append({
-            "Mod_name": author_name,
-            "content": message_content,
-            "attachments": attachments
-        })
-        with open(file_path, 'w') as json_file:
-            json.dump(ticket_data, json_file, indent=4)
 
     @discord.ui.button(label="Close", style=discord.ButtonStyle.danger)
     async def close_button(self, button: discord.ui.Button, interaction: discord.Interaction):
         await interaction.response.send_message("This ticket is closed.", ephemeral=True)
         self.closed = True
         self.record_ticket_closing("Closed")
-        interaction.user.send(f"Your ticket with ID {self.ticket_id} has been closed.")
+
+        ticket_author = self.author
+        await ticket_author.send(f"Your ticket with ID {self.ticket_id} has been closed.")
+
+        await asyncio.sleep(5)
+        await interaction.delete_original_message()
         self.stop() 
 
     def record_ticket_closing(self, closed):
@@ -330,7 +335,6 @@ async def stats(ctx):
 async def ticket(ctx):
     if not isinstance(ctx.channel, discord.DMChannel):
         await ctx.respond("Please open a ticket via DM.")
-        return
     
     await ctx.respond("Please describe your issue.")
 
@@ -379,9 +383,16 @@ async def ticketpanel(ctx):
     await ctx.respond(embed=embed, view=view)
 
 @bot.slash_command(name="aticket", description="Admin ticket view")
-async def aticket(ctx, ticket_id: str):
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.respond("You do not have the right to use the command.")
+async def aticket(ctx_or_interaction, ticket_id: str):
+    if isinstance(ctx_or_interaction, discord.Interaction):
+        user = ctx_or_interaction.user
+        response_method = ctx_or_interaction.response.send_message
+    else:
+        user = ctx_or_interaction.author
+        response_method = ctx_or_interaction.send
+
+    if not user.guild_permissions.administrator:
+        await response_method("You do not have the right to use the command.")
         return
 
     ticket_file_path = f"tickets/{ticket_id}.json"
@@ -389,19 +400,23 @@ async def aticket(ctx, ticket_id: str):
         with open(ticket_file_path, 'r') as json_file:
             ticket_data = json.load(json_file)
     except FileNotFoundError:
-        await ctx.respond("Ticket is not found.")
+        await response_method("Ticket is not found.")
         return
     except json.JSONDecodeError:
-        await ctx.respond("Error decoding ticket data.")
+        await response_method("Error decoding ticket data.")
         return
     
+    top_message = next((msg for msg in ticket_data['messages'] if isinstance(msg, str)), "No messages available")
+
     ticket_author = ticket_data['author']
     embed_info = discord.Embed(title=f"Ticket ID: {ticket_data['ticket_id']}", color=discord.Color.blue())
     embed_info.add_field(name="Author", value=ticket_data['author'], inline=False)
     embed_info.add_field(name="Created At", value=ticket_data['created_at'], inline=False)
     embed_info.add_field(name="Status", value=ticket_data['status'], inline=False)
     embed_info.add_field(name="Actioned By", value=ticket_data['actioned_by'], inline=False)
+    embed_info.add_field(name="Moderator", value=ticket_data['moderator'], inline=False)
     embed_info.add_field(name="Open/Closed", value=ticket_data['closed'], inline=False)
+    embed_info.add_field(name="Message", value=top_message, inline=False)
         
     embed_messages = discord.Embed(title="Messages", color=discord.Color.blue())
     messages = ticket_data.get('messages', [])
@@ -415,6 +430,6 @@ async def aticket(ctx, ticket_id: str):
         embed_messages.add_field(name="Message", value=message_content, inline=False)
         
     view = AticketView(ticket_id, ticket_author)
-    await ctx.respond(embeds=[embed_info, embed_messages], view=view)   
+    await response_method(embeds=[embed_info, embed_messages], view=view)   
 # Run bot
 bot.run(TOKEN)
